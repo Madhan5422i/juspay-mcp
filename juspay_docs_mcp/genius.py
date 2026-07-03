@@ -27,6 +27,7 @@ TODO (see below).
 
 import json
 import logging
+import os
 import re
 from urllib.parse import quote
 
@@ -49,7 +50,9 @@ _KB_MARKER = "/juspay_docs/in/"
 # returned separately, so strip the markers from the prose.
 _CITATION_RE = re.compile(r" ?K\[\d+(?:_\d+)?\]")
 
-_TIMEOUT = httpx.Timeout(90.0, connect=10.0)
+_TIMEOUT_SECONDS = float(os.getenv("JUSPAY_GENIUS_TIMEOUT_SECONDS", "30"))
+_CONNECT_TIMEOUT_SECONDS = float(os.getenv("JUSPAY_GENIUS_CONNECT_TIMEOUT_SECONDS", "10"))
+_TIMEOUT = httpx.Timeout(_TIMEOUT_SECONDS, connect=_CONNECT_TIMEOUT_SECONDS)
 _HEADERS = {
     "Accept": "text/event-stream",
     "Referer": "https://juspay.io/in/docs/",

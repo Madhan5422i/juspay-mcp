@@ -31,6 +31,12 @@ from juspay_mcp.auth.middleware import BearerAuthMiddleware
 from juspay_mcp.auth.portal_client import PortalClient
 from juspay_mcp.auth.routes import build_routes as build_oauth_routes
 from juspay_mcp.auth.state_store import MemoryStateStore
+from juspay_mcp.analytics.context import (
+    clear_current_context as clear_analytics_context,
+    from_request as analytics_context_from_request,
+    set_current_context as set_analytics_context,
+)
+from juspay_mcp.analytics.storage import shutdown as shutdown_analytics
 
 # Determine which MCP app to use based on JUSPAY_MCP_TYPE
 JUSPAY_MCP_TYPE = os.getenv("JUSPAY_MCP_TYPE", "").upper()
@@ -158,32 +164,38 @@ def main(host: str, port: int, mode: str):
                 f"New SSE connection from: {request.client} - {request.method} {request.url.path}"
             )
 
-            if active_app_key == "dashboard":
-                from juspay_dashboard_mcp.tools import set_juspay_request_credentials
-                juspay_creds = getattr(request.state, "juspay_credentials", None)
-                set_juspay_request_credentials(juspay_creds)
-            elif active_app_key == "default":
-                from juspay_mcp.tools import set_juspay_request_credentials
-                juspay_creds = getattr(request.state, "juspay_credentials", None)
-                set_juspay_request_credentials(juspay_creds)
-            # docs: no credentials needed
+            if JUSPAY_MCP_TYPE == "DASHBOARD" and active_app_key in ("dashboard", "docs"):
+                set_analytics_context(analytics_context_from_request(request, active_app_key))
 
-            async with transport.connect_sse(
-                request.scope, request.receive, request._send
-            ) as streams:
-                logging.info(f"MCP Session starting for {request.client}")
-                try:
-                    await active_app.run(
-                        streams[0],
-                        streams[1],
-                        active_app.create_initialization_options(),
-                    )
-                except Exception as e:
-                    logging.error(
-                        f"Error during MCP session for {request.client}: {e}"
-                    )
-                finally:
-                    logging.info(f"MCP Session ended for {request.client}")
+            try:
+                if active_app_key == "dashboard":
+                    from juspay_dashboard_mcp.tools import set_juspay_request_credentials
+                    juspay_creds = getattr(request.state, "juspay_credentials", None)
+                    set_juspay_request_credentials(juspay_creds)
+                elif active_app_key == "default":
+                    from juspay_mcp.tools import set_juspay_request_credentials
+                    juspay_creds = getattr(request.state, "juspay_credentials", None)
+                    set_juspay_request_credentials(juspay_creds)
+                # docs: no credentials needed
+
+                async with transport.connect_sse(
+                    request.scope, request.receive, request._send
+                ) as streams:
+                    logging.info(f"MCP Session starting for {request.client}")
+                    try:
+                        await active_app.run(
+                            streams[0],
+                            streams[1],
+                            active_app.create_initialization_options(),
+                        )
+                    except Exception as e:
+                        logging.error(
+                            f"Error during MCP session for {request.client}: {e}"
+                        )
+                    finally:
+                        logging.info(f"MCP Session ended for {request.client}")
+            finally:
+                clear_analytics_context()
 
             return _AlreadySentResponse()
 
@@ -209,18 +221,24 @@ def main(host: str, port: int, mode: str):
                 f"New StreamableHTTP request from: {request.client} - {request.method} {request.url.path}"
             )
 
-            if active_app_key == "dashboard":
-                from juspay_dashboard_mcp.tools import set_juspay_request_credentials
-                juspay_creds = getattr(request.state, "juspay_credentials", None)
-                set_juspay_request_credentials(juspay_creds)
-            elif active_app_key == "default":
-                from juspay_mcp.tools import set_juspay_request_credentials
-                juspay_creds = getattr(request.state, "juspay_credentials", None)
-                set_juspay_request_credentials(juspay_creds)
-            # docs: no credentials needed
+            if JUSPAY_MCP_TYPE == "DASHBOARD" and active_app_key in ("dashboard", "docs"):
+                set_analytics_context(analytics_context_from_request(request, active_app_key))
 
-            # session_manager writes the full HTTP response directly to send
-            await session_manager.handle_request(request.scope, request.receive, request._send)
+            try:
+                if active_app_key == "dashboard":
+                    from juspay_dashboard_mcp.tools import set_juspay_request_credentials
+                    juspay_creds = getattr(request.state, "juspay_credentials", None)
+                    set_juspay_request_credentials(juspay_creds)
+                elif active_app_key == "default":
+                    from juspay_mcp.tools import set_juspay_request_credentials
+                    juspay_creds = getattr(request.state, "juspay_credentials", None)
+                    set_juspay_request_credentials(juspay_creds)
+                # docs: no credentials needed
+
+                # session_manager writes the full HTTP response directly to send
+                await session_manager.handle_request(request.scope, request.receive, request._send)
+            finally:
+                clear_analytics_context()
             return _AlreadySentResponse()
 
         return handle_streamable_http, session_manager
@@ -302,13 +320,16 @@ def main(host: str, port: int, mode: str):
         @contextlib.asynccontextmanager
         async def lifespan(app):
             """Application lifespan context manager for multiple MCP apps."""
-            async with contextlib.AsyncExitStack() as stack:
-                await stack.enter_async_context(dashboard_session_mgr.run())
-                logger.info("Dashboard StreamableHTTP session manager started")
-                await stack.enter_async_context(docs_session_mgr.run())
-                logger.info("Docs StreamableHTTP session manager started")
-                logger.info("All StreamableHTTP session managers started successfully")
-                yield
+            try:
+                async with contextlib.AsyncExitStack() as stack:
+                    await stack.enter_async_context(dashboard_session_mgr.run())
+                    logger.info("Dashboard StreamableHTTP session manager started")
+                    await stack.enter_async_context(docs_session_mgr.run())
+                    logger.info("Docs StreamableHTTP session manager started")
+                    logger.info("All StreamableHTTP session managers started successfully")
+                    yield
+            finally:
+                await shutdown_analytics()
             logger.info("StreamableHTTP session managers stopped")
 
     else:
@@ -337,6 +358,7 @@ def main(host: str, port: int, mode: str):
                 try:
                     yield
                 finally:
+                    await shutdown_analytics()
                     if oauth_state_store is not None:
                         await oauth_state_store.stop()
                     if portal_client is not None:
